@@ -46,7 +46,7 @@ Correções em relação à v1:
    URLs resolvidas ficam em cache; páginas baixadas ficam em cache por
    1h. Em caso de falha, o erro lista as URLs tentadas, para diagnóstico.
 
-REQUISITOS:  pip install mcp requests beautifulsoup4
+REQUISITOS:  pip install mcp requests beautifulsoup4 lxml
 DEPLOY (Render): start command = python planalto_mcp_server.py
                  (usa a var de ambiente PORT automaticamente)
 """
@@ -224,9 +224,14 @@ def _dotted(num: str) -> str:
 
 
 def _bucket(ano: int) -> str:
-    if ano < 2003:
+    """Buckets REAIS do Planalto: _ato2004-2006 (3 anos!), depois
+    2007-2010, 2011-2014, 2015-2018, 2019-2022, 2023-2026...
+    Leis de 2003 e anteriores NÃO usam bucket (ficam em leis/<ano>/)."""
+    if ano <= 2003:
         return ""
-    start = 2003 + ((ano - 2003) // 4) * 4
+    if ano <= 2006:
+        return "2004-2006"
+    start = 2007 + ((ano - 2007) // 4) * 4
     return f"{start}-{start + 3}"
 
 
@@ -260,16 +265,16 @@ def candidate_paths(tipo: str, numero: str, ano: Optional[int]) -> list[str]:
 
     if tipo == "lei":
         anos = [ano] if ano else []
-        # pós-2003 (só se soubermos o ano; sem ano não dá para achar o bucket)
+        # pós-2004: buckets _atoXXXX-YYYY
         for a in anos:
-            if a and a >= 2003:
+            if a and a >= 2004:
                 b = _bucket(a)
                 for n_ in (nd, numero):
                     add(f"_ato{b}/{a}/lei/l{n_}compilado.htm",
                         f"_ato{b}/{a}/lei/l{n_}.htm")
-        # 1999–2002: subpasta do ano
+        # 1999–2003: subpasta do ano (2003 usa número pontuado: L10.825.htm)
         for a in anos:
-            if a and 1999 <= a <= 2002:
+            if a and 1999 <= a <= 2003:
                 for n_ in (numero, nd):
                     add(f"leis/{a}/l{n_}compilada.htm",
                         f"leis/{a}/l{n_}compilado.htm",
@@ -294,11 +299,13 @@ def candidate_paths(tipo: str, numero: str, ano: Optional[int]) -> list[str]:
             f"leis/lcp/Lcp{numero}.htm")
 
     elif tipo == "del":
-        add(f"decreto-lei/del{numero}compilado.htm",
-            f"decreto-lei/del{numero}.htm",
-            f"decreto-lei/1937-1946/del{numero}.htm",
-            f"decreto-lei/1965-1988/del{numero}.htm",
-            f"decreto-lei/1965-1988/Del{numero}.htm")
+        # decretos-lei antigos usam número com zero à esquerda (Del0229.htm)
+        for n_ in dict.fromkeys([numero, numero.zfill(4)]):
+            add(f"decreto-lei/del{n_}compilado.htm",
+                f"decreto-lei/del{n_}.htm",
+                f"decreto-lei/1937-1946/del{n_}.htm",
+                f"decreto-lei/1965-1988/del{n_}.htm",
+                f"decreto-lei/1965-1988/Del{n_}.htm")
 
     elif tipo == "dec":
         if ano and ano >= 2003:
@@ -318,6 +325,7 @@ def candidate_paths(tipo: str, numero: str, ano: Optional[int]) -> list[str]:
             add(f"_ato{b}/{ano}/mpv/mpv{numero}.htm")
         add(f"mpv/mpv{numero}.htm",
             f"mpv/{numero}.htm",
+            f"MPV/{numero}.htm",
             f"mpv/antigas/{numero}.htm",
             f"mpv/Antigas/{numero}.htm")
 
@@ -336,6 +344,73 @@ _resolved: dict[str, str] = {}
 _session = requests.Session()
 _session.headers.update(HEADERS)
 
+_ART_COUNT = re.compile(r"^\s*Art\s*\.?\s*[\d.]", re.MULTILINE)
+
+
+def _count_arts(text: str) -> int:
+    return len(_ART_COUNT.findall(text))
+
+
+def _decode(resp: requests.Response) -> str:
+    """Planalto serve páginas antigas em Windows-1252. O detector automático
+    (apparent_encoding) erra para Latin-2 e corrompe acentos (ő, ă, ş).
+    Lemos o charset declarado no <meta>; na ausência, forçamos cp1252."""
+    m = re.search(rb"charset\s*=\s*[\"']?([A-Za-z0-9_-]+)",
+                  resp.content[:3000], re.IGNORECASE)
+    enc = m.group(1).decode("ascii", "ignore") if m else "windows-1252"
+    try:
+        return resp.content.decode(enc, errors="replace")
+    except (LookupError, UnicodeDecodeError):
+        return resp.content.decode("windows-1252", errors="replace")
+
+
+def _regex_strip(html: str) -> str:
+    """Extração por regex, imune a HTML malformado (a página da CLT derruba
+    parsers estruturados no meio do arquivo — art. 478 em diante sumia)."""
+    import html as html_mod
+    h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+    h = re.sub(r"(?is)<!--.*?-->", " ", h)
+    h = re.sub(r"(?i)<\s*(br|/p|/div|/tr|/li|/h[1-6]|/table|/blockquote)[^>]*>",
+               "\n", h)
+    h = re.sub(r"<[^>]*>", " ", h)
+    h = html_mod.unescape(h)
+    lines = [re.sub(r"[ \t\xa0]+", " ", ln).strip() for ln in h.split("\n")]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def _soup_text(html: str) -> str:
+    """Extração estruturada: um parágrafo por linha (evita ordinais e
+    quebras de fonte virarem linhas próprias)."""
+    for parser in ("lxml", "html.parser"):
+        try:
+            soup = BeautifulSoup(html, parser)
+        except Exception:
+            continue
+        for bad in soup(["script", "style"]):
+            bad.decompose()
+        paras = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
+        paras = [p for p in paras if p]
+        text = "\n".join(paras) if paras else soup.get_text("\n")
+        if text.strip():
+            return text
+    return ""
+
+
+def _fix_ordinals(t: str) -> str:
+    t = t.replace("\xa0", " ")
+    # ordinal solto após número em contextos seguros (Art. 5 o / § 2 o / n o).
+    # ATENÇÃO: o ordinal sobrescrito é sempre "o" MINÚSCULO — "Art. 1.011. O
+    # administrador" tem "O" maiúsculo de início de frase, não ordinal. E o
+    # número capturado não pode terminar em ponto (para "1.011." não engolir
+    # o ponto final e casar com o "O" seguinte).
+    t = re.sub(r"([Aa]rt\.?\s*\d+(?:\.\d+)*(?:-[A-Za-z])?)\s*[ºo°](?=[^A-Za-z]|$)",
+               r"\1º", t)
+    t = re.sub(r"(§\s*\d+(?:\.\d+)*)\s*[ºo°](?=[^A-Za-z]|$)", r"\1º", t)
+    t = re.sub(r"(?<=\bn)\s+[ºo°](?=[^A-Za-z]|$)", "º", t)
+    t = re.sub(r"(?<=\d)\s*[º°]", "º", t)
+    t = re.sub(r"[ \t]{2,}", " ", t)
+    return t
+
 
 def _fetch(url: str) -> Optional[str]:
     cached = _page_cache.get(url)
@@ -347,13 +422,14 @@ def _fetch(url: str) -> Optional[str]:
         return None
     if r.status_code != 200:
         return None
-    # Planalto usa windows-1252/latin-1 na maior parte das páginas antigas
-    r.encoding = r.apparent_encoding or "windows-1252"
-    html = r.text
-    # valida que é mesmo uma página de norma
+    html = _decode(r)
     if "Art" not in html:
         return None
-    text = BeautifulSoup(html, "html.parser").get_text("\n")
+    # duas extrações; fica a que enxergar MAIS artigos (anti-truncamento)
+    t1 = _soup_text(html)
+    t2 = _regex_strip(html)
+    text = t1 if _count_arts(t1) >= _count_arts(t2) else t2
+    text = _fix_ordinals(text)
     _page_cache[url] = (time.time(), text)
     return text
 
@@ -400,7 +476,11 @@ def resolve_and_fetch(referencia: str):
 # 5. Extração do artigo / inciso / alínea
 # ---------------------------------------------------------------------------
 _ART_HEADER = re.compile(
-    r"^[\s\"'(]*Art\s*\.?\s*([\d.]+(?:\s*-\s*[A-Za-z])?)\s*[ºo°]?",
+    # sufixo de letra ("477-A") é sempre COLADO ao número; "Art. 478 - A
+    # indenização" usa hífen espaçado como separador e NÃO é sufixo.
+    # Guarda final explícita em vez de \b porque "º" é word char em
+    # Unicode e "8º" não tem word boundary entre o dígito e o ordinal.
+    r"^[\s\"'(]*Art\s*\.?\s*([\d.]+(?:-[A-Za-z])?)(?=[^0-9A-Za-z]|$)\s*[ºo°]?",
     re.MULTILINE,
 )
 
@@ -422,15 +502,22 @@ def extract_article(text: str, artigo: str) -> Optional[str]:
     return None
 
 
+_STRUCT_HDR = re.compile(
+    r"^(CAP.TULO|T.TULO|SE..O|Se..o|Subse..o|LIVRO|PARTE)\b", re.IGNORECASE)
+
+
 def _clean(chunk: str) -> str:
     lines = [ln.strip() for ln in chunk.splitlines()]
     lines = [ln for ln in lines if ln]
-    # remove lixo de navegação eventual
-    lines = [ln for ln in lines if not re.match(r"^(Presid.ncia|Casa Civil|Subchefia)", ln)]
-    out, prev_blank = [], False
-    for ln in lines:
-        out.append(ln)
-    return "\n\n".join(out)
+    lines = [ln for ln in lines
+             if not re.match(r"^(Presid.ncia|Casa Civil|Subchefia)", ln)]
+    # apara cabeçalhos estruturais e linhas ALL-CAPS que vazam no fim do
+    # recorte (o artigo termina onde começa o próximo Art., e o miolo entre
+    # eles pode conter "CAPÍTULO IX / DAS ALIENAÇÕES" etc.)
+    while lines and (_STRUCT_HDR.match(lines[-1])
+                     or (lines[-1].isupper() and len(lines[-1]) < 80)):
+        lines.pop()
+    return "\n\n".join(lines)
 
 
 _ROMAN = re.compile(r"^([IVXLCDM]+)\s*[-–]", re.MULTILINE)
