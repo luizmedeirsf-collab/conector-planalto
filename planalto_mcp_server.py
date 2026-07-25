@@ -281,7 +281,7 @@ def _extrair_artigo(paragrafos: list[str], artigo: str) -> list[str] | None:
         if padrao_qualquer_artigo.match(p_strip) and not padrao_inicio.match(p_strip):
             break
         trecho.append(p)
-        if len(trecho) > 30:  # corte de segurança pra artigos muito longos
+        if len(trecho) > 400:  # corte de segurança pra artigos muito longos
             break
 
     # A página do Planalto frequentemente quebra o texto em blocos curtos
