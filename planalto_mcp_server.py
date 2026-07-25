@@ -66,7 +66,14 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-    )
+    ),
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
+    "Referer": "https://www.planalto.gov.br/ccivil_03/",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 TIMEOUT = 20
 
@@ -447,6 +454,16 @@ def _get(url: str):
         return None
 
 
+def _body_snippet(html: str) -> str:
+    """Trecho curto e legível do corpo, para diagnóstico."""
+    s = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html[:6000])
+    s = re.sub(r"<[^>]*>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        s = "corpo só com script/markup, sem texto visível"
+    return s[:160]
+
+
 def _fetch(url: str, _retry: bool = True) -> Optional[str]:
     cached = _page_cache.get(url)
     if cached and time.time() - cached[0] < 3600:
@@ -472,7 +489,23 @@ def _fetch(url: str, _retry: bool = True) -> Optional[str]:
             return _fetch(url, _retry=False)
         return None
     if "Art" not in html:
-        _diag[url] = "HTTP 200 mas sem conteúdo de norma ('Art' ausente)"
+        # provável desafio JavaScript do WAF (F5/TSPD) servido com 200.
+        # A 1ª resposta costuma gravar cookie na sessão; nova tentativa na
+        # MESMA sessão pode passar. Depois, tenta o mesmo caminho via http.
+        _diag[url] = ("HTTP 200 sem conteúdo de norma; corpo: \""
+                      + _body_snippet(html) + "\"")
+        if _retry:
+            time.sleep(1.5)
+            t = _fetch(url, _retry=False)
+            if t:
+                return t
+            if url.startswith("https://"):
+                alt = "http://" + url[8:]
+                t = _fetch(alt, _retry=False)
+                if t:
+                    _page_cache[url] = _page_cache[alt]
+                    _diag.pop(url, None)
+                    return t
         return None
     # duas extrações; fica a que enxergar MAIS artigos (anti-truncamento)
     t1 = _soup_text(html)
