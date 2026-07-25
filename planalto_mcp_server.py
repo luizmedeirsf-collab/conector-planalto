@@ -114,12 +114,13 @@ def _candidatos_url(tipo: str, numero: str, ano: str | None) -> list[str]:
     de nomenclatura usados desde 1930 até hoje.
     """
     base = "https://www.planalto.gov.br/ccivil_03"
-    numero_limpo = numero.replace(".", "").replace("/", "")
     candidatos = []
 
     if tipo == "constituicao":
         candidatos.append(f"{base}/constituicao/constituicaocompilado.htm")
         return candidatos
+
+    numero_limpo = numero.replace(".", "").replace("/", "")
 
     if tipo == "decreto-lei":
         candidatos.append(f"{base}/decreto-lei/del{numero_limpo}compilado.htm")
