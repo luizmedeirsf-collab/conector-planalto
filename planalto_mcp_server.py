@@ -363,16 +363,34 @@ def _count_arts(text: str) -> int:
 
 
 def _decode(resp: requests.Response) -> str:
-    """Planalto serve páginas antigas em Windows-1252. O detector automático
-    (apparent_encoding) erra para Latin-2 e corrompe acentos (ő, ă, ş).
-    Lemos o charset declarado no <meta>; na ausência, forçamos cp1252."""
-    m = re.search(rb"charset\s*=\s*[\"']?([A-Za-z0-9_-]+)",
-                  resp.content[:3000], re.IGNORECASE)
+    """Planalto serve a maioria das páginas em Windows-1252, MAS alguns
+    arquivos isolados (ex.: l11340.htm, Lei Maria da Penha) estão salvos em
+    UTF-16 com BOM — decodificados como cp1252 viram 'A\\x00r\\x00t' e a
+    página parece vazia de conteúdo. Ordem de detecção:
+    1) BOM (UTF-16 LE/BE, UTF-8);
+    2) charset declarado no <meta> (também procurado numa cópia sem bytes
+       nulos, para metas dentro de arquivos UTF-16 sem BOM);
+    3) fallback windows-1252 (nunca o apparent_encoding, que erra p/ Latin-2)."""
+    raw = resp.content
+    if raw[:2] == b"\xff\xfe":
+        return raw.decode("utf-16-le", errors="replace")
+    if raw[:2] == b"\xfe\xff":
+        return raw.decode("utf-16-be", errors="replace")
+    if raw[:3] == b"\xef\xbb\xbf":
+        return raw.decode("utf-8-sig", errors="replace")
+    head = raw[:3000]
+    m = re.search(rb"charset\s*=\s*[\"']?([A-Za-z0-9_-]+)", head, re.IGNORECASE)
+    if not m:
+        # meta dentro de UTF-16 sem BOM: bytes nulos intercalados
+        m = re.search(rb"charset\s*=\s*[\"']?([A-Za-z0-9_-]+)",
+                      head.replace(b"\x00", b""), re.IGNORECASE)
+        if m and b"\x00" in head:
+            return raw.decode("utf-16-le", errors="replace")
     enc = m.group(1).decode("ascii", "ignore") if m else "windows-1252"
     try:
-        return resp.content.decode(enc, errors="replace")
+        return raw.decode(enc, errors="replace")
     except (LookupError, UnicodeDecodeError):
-        return resp.content.decode("windows-1252", errors="replace")
+        return raw.decode("windows-1252", errors="replace")
 
 
 def _regex_strip(html: str) -> str:
