@@ -417,31 +417,62 @@ def _fix_ordinals(t: str) -> str:
 
 
 _CAPTCHA_MARKS = ("acesso automatizado", "support id", "captcha")
+# diagnóstico da última tentativa por URL (exibido nas mensagens de erro)
+_diag: dict[str, str] = {}
+
+
+def _get(url: str):
+    """GET com tolerância às idiossincrasias do Planalto:
+    1) tentativa https normal;
+    2) em erro de SSL (cadeia de certificados historicamente incompleta em
+       parte dos servidores do pool), repete sem verificação;
+    3) em qualquer outra exceção de rede, repete via http:// (o Planalto
+       serve ambos os esquemas e o conteúdo é idêntico)."""
+    try:
+        return _session.get(url, timeout=TIMEOUT)
+    except requests.exceptions.SSLError:
+        _diag[url] = "SSLError (cadeia de certificados); repetindo sem verificação"
+        try:
+            return _session.get(url, timeout=TIMEOUT, verify=False)
+        except requests.RequestException as e:
+            _diag[url] = f"SSLError e retry falhou: {type(e).__name__}"
+            return None
+    except requests.RequestException as e:
+        _diag[url] = f"{type(e).__name__}; repetindo via http://"
+        if url.startswith("https://"):
+            try:
+                return _session.get("http://" + url[8:], timeout=TIMEOUT)
+            except requests.RequestException as e2:
+                _diag[url] = f"{type(e).__name__} e http:// falhou: {type(e2).__name__}"
+        return None
 
 
 def _fetch(url: str, _retry: bool = True) -> Optional[str]:
     cached = _page_cache.get(url)
     if cached and time.time() - cached[0] < 3600:
         return cached[1]
-    try:
-        r = _session.get(url, timeout=TIMEOUT)
-    except requests.RequestException:
+    r = _get(url)
+    if r is None:
+        _diag.setdefault(url, "falha de rede")
         return None
-    # WAF/rate limit: espera e tenta UMA vez de novo
     if r.status_code in (403, 429) and _retry:
+        _diag[url] = f"HTTP {r.status_code} (WAF/rate limit); aguardando e repetindo"
         time.sleep(2.0)
         return _fetch(url, _retry=False)
     if r.status_code != 200:
+        _diag[url] = f"HTTP {r.status_code}"
         return None
     html = _decode(r)
     low = html[:4000].lower()
     # página de bloqueio/captcha servida com status 200: retry único
     if any(mk in low for mk in _CAPTCHA_MARKS):
+        _diag[url] = "página de bloqueio/captcha (HTTP 200)"
         if _retry:
             time.sleep(2.0)
             return _fetch(url, _retry=False)
         return None
     if "Art" not in html:
+        _diag[url] = "HTTP 200 mas sem conteúdo de norma ('Art' ausente)"
         return None
     # duas extrações; fica a que enxergar MAIS artigos (anti-truncamento)
     t1 = _soup_text(html)
@@ -449,6 +480,7 @@ def _fetch(url: str, _retry: bool = True) -> Optional[str]:
     text = t1 if _count_arts(t1) >= _count_arts(t2) else t2
     text = _fix_ordinals(text)
     _page_cache[url] = (time.time(), text)
+    _diag.pop(url, None)
     return text
 
 
@@ -624,7 +656,9 @@ def buscar_artigo(referencia: str, artigo: str, item: str = "") -> str:
     """
     text, info = resolve_and_fetch(referencia)
     if text is None:
-        tried = "\n".join(f"  - {u}" for u in info[:15]) or "  (nenhuma URL gerada)"
+        tried = "\n".join(
+            f"  - {u}  [{_diag.get(u, 'não encontrado')}]" for u in info[:15]
+        ) or "  (nenhuma URL gerada)"
         return (
             f"Não localizei '{referencia}' no Planalto. URLs testadas:\n{tried}\n"
             "Dica: informe tipo + número + ano (ex.: 'lei 10.406/2002')."
