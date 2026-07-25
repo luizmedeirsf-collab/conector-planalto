@@ -232,7 +232,10 @@ def _baixar_paragrafos(url: str) -> list[str]:
     em vez de depender da estrutura de tags.
     """
     resp = requests.get(url, headers=HEADERS, timeout=20)
-    resp.encoding = resp.apparent_encoding or "ISO-8859-1"
+    # Forçamos ISO-8859-1: a detecção automática (chardet) erra com
+    # frequência nessas páginas antigas do Planalto, produzindo caracteres
+    # corrompidos (mojibake) em vez do acentuado correto.
+    resp.encoding = "ISO-8859-1"
     soup = BeautifulSoup(resp.text, "html.parser")
     for tag in soup(["script", "style"]):
         tag.decompose()
@@ -316,16 +319,26 @@ def _filtrar_inciso_ou_alinea(blocos: list[str], referencia_item: str) -> str | 
     """
     ref = referencia_item.strip().upper().rstrip(".-)")
 
-    # Alínea: uma letra minúscula seguida de ) — ex. "a)", "b)"
-    if re.fullmatch(r"[A-Z]", ref):
-        padrao = re.compile(rf"^{re.escape(ref)}\s*\)", re.IGNORECASE)
-    else:
-        # Inciso: numeração romana — ex. "I", "IV", "XIII", "IV-A"
-        padrao = re.compile(rf"^{re.escape(ref)}\s*[-–\.]", re.IGNORECASE)
+    # Letras que também são numerais romanos válidos (I, V, X, L, C, D, M)
+    # são ambíguas — priorizamos a interpretação como INCISO ROMANO,
+    # porque é o caso mais comum, e só tratamos como alínea se a
+    # referência não for um numeral romano válido.
+    eh_romano = bool(re.fullmatch(r"[IVXLCDM]+(-[A-Z])?", ref))
 
-    for b in blocos:
-        if padrao.match(b.strip()):
-            return b.strip()
+    if eh_romano:
+        padrao_romano = re.compile(rf"^{re.escape(ref)}\s*[-–\.]", re.IGNORECASE)
+        for b in blocos:
+            if padrao_romano.match(b.strip()):
+                return b.strip()
+        # Não achou como romano — tenta como alínea antes de desistir,
+        # cobrindo o caso raro de referência de letra única que não seja
+        # numeral romano válido em contexto de alínea.
+
+    if re.fullmatch(r"[A-Z]", ref):
+        padrao_alinea = re.compile(rf"^{re.escape(ref)}\s*\)", re.IGNORECASE)
+        for b in blocos:
+            if padrao_alinea.match(b.strip()):
+                return b.strip()
 
     return None
 
