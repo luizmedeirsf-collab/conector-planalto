@@ -265,17 +265,21 @@ def candidate_paths(tipo: str, numero: str, ano: Optional[int]) -> list[str]:
 
     if tipo == "lei":
         anos = [ano] if ano else []
-        # pós-2004: buckets _atoXXXX-YYYY
+        # pós-2004: buckets _atoXXXX-YYYY — o padrão REAL não tem pontos no
+        # número (l11340.htm, l14133.htm); testamos o mais provável PRIMEIRO
+        # para minimizar 404s (rajadas de erro ativam o WAF do Planalto)
         for a in anos:
             if a and a >= 2004:
                 b = _bucket(a)
-                for n_ in (nd, numero):
-                    add(f"_ato{b}/{a}/lei/l{n_}compilado.htm",
-                        f"_ato{b}/{a}/lei/l{n_}.htm")
+                add(f"_ato{b}/{a}/lei/l{numero}.htm",
+                    f"_ato{b}/{a}/lei/l{numero}compilado.htm",
+                    f"_ato{b}/{a}/lei/l{nd}.htm",
+                    f"_ato{b}/{a}/lei/l{nd}compilado.htm")
         # 1999–2003: subpasta do ano (2003 usa número pontuado: L10.825.htm)
         for a in anos:
             if a and 1999 <= a <= 2003:
-                for n_ in (numero, nd):
+                ordem = (nd, numero) if a == 2003 else (numero, nd)
+                for n_ in ordem:
                     add(f"leis/{a}/l{n_}compilada.htm",
                         f"leis/{a}/l{n_}compilado.htm",
                         f"leis/{a}/l{n_}.htm",
@@ -412,7 +416,10 @@ def _fix_ordinals(t: str) -> str:
     return t
 
 
-def _fetch(url: str) -> Optional[str]:
+_CAPTCHA_MARKS = ("acesso automatizado", "support id", "captcha")
+
+
+def _fetch(url: str, _retry: bool = True) -> Optional[str]:
     cached = _page_cache.get(url)
     if cached and time.time() - cached[0] < 3600:
         return cached[1]
@@ -420,9 +427,20 @@ def _fetch(url: str) -> Optional[str]:
         r = _session.get(url, timeout=TIMEOUT)
     except requests.RequestException:
         return None
+    # WAF/rate limit: espera e tenta UMA vez de novo
+    if r.status_code in (403, 429) and _retry:
+        time.sleep(2.0)
+        return _fetch(url, _retry=False)
     if r.status_code != 200:
         return None
     html = _decode(r)
+    low = html[:4000].lower()
+    # página de bloqueio/captcha servida com status 200: retry único
+    if any(mk in low for mk in _CAPTCHA_MARKS):
+        if _retry:
+            time.sleep(2.0)
+            return _fetch(url, _retry=False)
+        return None
     if "Art" not in html:
         return None
     # duas extrações; fica a que enxergar MAIS artigos (anti-truncamento)
@@ -462,7 +480,9 @@ def resolve_and_fetch(referencia: str):
         t = _fetch(_resolved[cache_key])
         if t:
             return t, _resolved[cache_key]
-    for path in candidate_paths(tipo, numero, ano):
+    for i, path in enumerate(candidate_paths(tipo, numero, ano)):
+        if i:
+            time.sleep(0.35)  # cortesia: rajada de 404s ativa o WAF
         url = BASE + path
         tried.append(url)
         t = _fetch(url)
@@ -489,6 +509,11 @@ def _norm_artnum(s: str) -> str:
     return re.sub(r"\s", "", s).replace(".", "").upper()
 
 
+_ANNEX_MARK = re.compile(
+    r"^\s*(ANEXO\b|QUADRO\b|\d+º?\s*GRUPO\b|CONFEDERA..O NACIONAL)", re.MULTILINE)
+_MAX_ART_CHARS = 12000
+
+
 def extract_article(text: str, artigo: str) -> Optional[str]:
     target = _norm_artnum(_norm(artigo).replace("art", "").strip(" ."))
     headers = []
@@ -498,6 +523,15 @@ def extract_article(text: str, artigo: str) -> Optional[str]:
         if num == target:
             end = headers[i + 1][0] if i + 1 < len(headers) else len(text)
             chunk = text[pos:end]
+            # o último artigo de um diploma não tem "próximo Art." para
+            # delimitar e arrastaria anexos/quadros inteiros (ex.: Quadro de
+            # Atividades da CLT) — corta no primeiro marcador de anexo
+            am = _ANNEX_MARK.search(chunk, 1)
+            if am:
+                chunk = chunk[:am.start()]
+            if len(chunk) > _MAX_ART_CHARS:
+                chunk = chunk[:_MAX_ART_CHARS] + \
+                    "\n\n[... texto truncado: dispositivo excepcionalmente extenso ...]"
             return _clean(chunk)
     return None
 
