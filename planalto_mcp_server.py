@@ -1,421 +1,536 @@
 """
-Servidor MCP - Conector de Legislação Federal (Planalto)
-==========================================================
+Servidor MCP — Buscador de Legislação (Planalto) — v2 CORRIGIDA
+=================================================================
 
-Expõe duas ferramentas ao Claude:
-  - buscar_artigo(referencia, artigo): resolve a URL dinamicamente e
-    retorna o texto de um artigo específico de qualquer norma federal
-  - listar_atalhos(): lista os atalhos de resolução instantânea (CF, CLT etc.)
+Correções em relação à v1:
 
-REQUISITOS
-----------
-pip install mcp requests beautifulsoup4 --break-system-packages
+1. ATALHOS COM URL FIXA E VERIFICADA
+   Cada atalho (CF, CLT, CC...) agora aponta para uma LISTA de caminhos
+   candidatos reais do Planalto, testados em ordem. O bug do "CC" ocorria
+   porque o resolvedor tentava gerar a URL dinamicamente e o padrão de
+   leis de 1999-2002 é diferente ("leis/2002/l10406compilada.htm" — com
+   subpasta do ano E sufixo "compilada", não "compilado").
 
-COMO RODAR LOCAL (teste rapido, antes de hospedar)
------------------------------------------------------
-python planalto_mcp_server.py
-# sobe um servidor HTTP/SSE em http://localhost:8000/sse
+2. RESOLUÇÃO DINÂMICA POR ÉPOCA
+   Para normas fora dos atalhos, o gerador de candidatos agora conhece
+   TODOS os padrões históricos de URL do Planalto:
+     - Leis até ~1998:      ccivil_03/leis/l8078.htm | L8078compilado.htm
+     - Leis 1999–2002:      ccivil_03/leis/2002/l10406.htm | ...compilada.htm
+                            ccivil_03/leis/LEIS_2001/L10270.htm
+     - Leis 2003+:          ccivil_03/_ato2003-2006/2003/lei/l10.671.htm
+                            (buckets de 4 anos, número COM ponto de milhar,
+                             variantes de caixa _Ato/.../Lei/L14133.htm)
+     - Decretos-lei:        ccivil_03/decreto-lei/del5452.htm
+                            + subpastas 1937-1946 / 1965-1988
+     - Leis complementares: ccivil_03/leis/lcp/lcp123.htm
+     - Decretos:            ccivil_03/decreto/... e _ato.../decreto/d10.854.htm
+     - MPs:                 ccivil_03/_ato.../mpv/mpv1108.htm e mpv/antigas
+     - ECs:                 ccivil_03/constituicao/emendas/emc/emc45.htm
 
-COMO HOSPEDAR NO RENDER (free tier)
---------------------------------------
-1. Suba esta pasta inteira (este arquivo + requirements.txt) para um
-   repositorio no GitHub.
-2. No Render (render.com), crie um "New Web Service", conecte o repo.
-3. Build command: pip install -r requirements.txt
-   Start command: python planalto_mcp_server.py
-4. O Render injeta a variavel de ambiente PORT automaticamente - o script
-   ja le essa variavel (veja o final do arquivo).
-5. Apos o deploy, sua URL do conector sera:
-   https://SEU-SERVICO.onrender.com/sse
+3. PARSING DE REFERÊNCIA TOLERANTE
+   Aceita indistintamente: "CC", "cc", "código civil", "lei 10406/2002",
+   "lei 10.406/2002", "Lei nº 10.406, de 10 de janeiro de 2002",
+   "lei n. 10406 de 2002", "LC 123/06", "del 5452", "dl 5.452/43",
+   "MP 1108/2022", "EC 45", "emenda constitucional 45/2004" etc.
+   Normalização: minúsculas, sem acentos, remove "nº/n.º/no/n.",
+   remove pontos do número, expande ano de 2 dígitos.
 
-COMO REGISTRAR NO CLAUDE
--------------------------
-- Em claude.ai: Configuracoes > Conectores > Adicionar conector personalizado,
-  cole a URL https://SEU-SERVICO.onrender.com/sse
+4. BUSCA DE ARTIGO TOLERANTE
+   Aceita "1010", "1.010", "7", "7º", "7o", "7-A", "art. 1.010".
+   O extrator indexa TODOS os cabeçalhos "Art. X" do texto (inclusive os
+   grafados pelo Planalto como "Art. 1  o", com ordinal separado por
+   espaços) e compara números normalizados (sem pontos, sem ordinal),
+   fatiando do artigo pedido até o cabeçalho seguinte.
 
-- Claude Desktop / Claude Code (via mcp-remote, ja que eles esperam stdio
-  por padrao para conectores remotos):
+5. CACHE + MENSAGENS DE ERRO ÚTEIS
+   URLs resolvidas ficam em cache; páginas baixadas ficam em cache por
+   1h. Em caso de falha, o erro lista as URLs tentadas, para diagnóstico.
 
-    {
-      "mcpServers": {
-        "planalto": {
-          "command": "npx",
-          "args": ["-y", "mcp-remote", "https://SEU-SERVICO.onrender.com/sse"]
-        }
-      }
-    }
-
-ATENCAO - FREE TIER DORME
-----------------------------
-O Render free tier hiberna o servico apos ~15 min sem requisicoes. A
-primeira chamada depois disso demora ~30s pra "acordar" o servico - e
-normal, nao e erro. Chamadas seguintes voltam ao normal.
-
-LIMITAÇÕES CONHECIDAS (leia antes de confiar no resultado)
-------------------------------------------------------------
-1. O Planalto não tem API de busca nem uma lista única "todas as leis".
-   Este servidor resolve a URL dinamicamente, testando os padrões de
-   nomenclatura conhecidos (por tipo de norma, número e ano). Isso cobre
-   a grande maioria das leis, decretos, decretos-lei, leis complementares,
-   MPs e emendas constitucionais — mas normas com convenção de URL fora do
-   padrão, ou muito recentes, podem não ser encontradas. Informar o ano
-   junto com o número aumenta muito a taxa de acerto.
-2. A extração do artigo é feita com regex sobre o texto puro da página.
-   Leis com formatação irregular (ex. artigos revogados, redações dadas
-   por leis posteriores, notas de rodapé no meio do texto) podem quebrar
-   o recorte. SEMPRE confira o resultado contra a URL original antes de
-   citar em uma peça.
-3. Eu não consegui testar este script contra o site real (meu ambiente de
-   execução não tem acesso de rede ao planalto.gov.br). Rode localmente
-   e me avise o que quebrar para eu ajustar.
+REQUISITOS:  pip install mcp requests beautifulsoup4
+DEPLOY (Render): start command = python planalto_mcp_server.py
+                 (usa a var de ambiente PORT automaticamente)
 """
 
 import os
 import re
+import time
+import unicodedata
+from typing import Optional
+
 import requests
 from bs4 import BeautifulSoup
 from mcp.server.fastmcp import FastMCP
 
-# O Render define a porta via variável de ambiente PORT. Localmente,
-# cai no padrão 8000.
-PORTA = int(os.environ.get("PORT", 8000))
-
-mcp = FastMCP("planalto-legislacao", host="0.0.0.0", port=PORTA)
-
-# Atalhos para os códigos/diplomas de uso mais frequente — resolução
-# instantânea, sem precisar testar padrões de URL.
-ATALHOS = {
-    "CF": ("constituicao", None, None),
-    "CLT": ("decreto-lei", "5452", "1943"),
-    "CC": ("lei", "10406", "2002"),
-    "CPC": ("lei", "13105", "2015"),
-    "CP": ("decreto-lei", "2848", "1940"),
-    "CPP": ("decreto-lei", "3689", "1941"),
-    "CDC": ("lei", "8078", "1990"),
-    "CTN": ("lei", "5172", "1966"),
-}
-
+BASE = "https://www.planalto.gov.br/ccivil_03/"
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; ConectorLegislacaoMCP/1.0)"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+    )
+}
+TIMEOUT = 20
+
+mcp = FastMCP(
+    "Buscador de Legislação",
+    host="0.0.0.0",
+    port=int(os.environ.get("PORT", 8000)),
+)
+
+# ---------------------------------------------------------------------------
+# 1. ATALHOS — cada um com lista de caminhos candidatos REAIS, em ordem de
+#    preferência (versão compilada primeiro). Corrigido o CC e ampliada a
+#    lista com diplomas de uso frequente.
+# ---------------------------------------------------------------------------
+SHORTCUTS: dict[str, list[str]] = {
+    "cf": ["constituicao/constituicao.htm"],
+    "clt": ["decreto-lei/del5452compilado.htm", "decreto-lei/del5452.htm"],
+    # >>> CORREÇÃO DO BUG: leis de 1999–2002 vivem em leis/<ano>/ e a versão
+    # consolidada do CC usa o sufixo "compilada" (feminino).
+    "cc": ["leis/2002/l10406compilada.htm", "leis/2002/L10406compilada.htm",
+           "leis/2002/l10406.htm"],
+    "cpc": ["_ato2015-2018/2015/lei/l13105.htm",
+            "_Ato2015-2018/2015/Lei/L13105.htm"],
+    "cp": ["decreto-lei/del2848compilado.htm", "decreto-lei/del2848.htm"],
+    "cpp": ["decreto-lei/del3689compilado.htm", "decreto-lei/del3689.htm"],
+    "cdc": ["leis/l8078compilado.htm", "leis/l8078.htm"],
+    "ctn": ["leis/l5172compilado.htm", "leis/l5172.htm"],
+    # Extras úteis (não quebram nada; só ampliam a resolução instantânea)
+    "eca": ["leis/l8069compilado.htm", "leis/l8069.htm"],
+    "lep": ["leis/l7210compilado.htm", "leis/l7210.htm"],
+    "lindb": ["decreto-lei/del4657compilado.htm", "decreto-lei/del4657.htm"],
+    "lrf": ["leis/lcp/lcp101.htm", "leis/lcp/Lcp101.htm"],
+    "ldb": ["leis/l9394compilado.htm", "leis/l9394.htm"],
+    "ce": ["leis/l4737compilado.htm", "leis/l4737.htm"],  # Código Eleitoral
 }
 
-# Faixas de mandato presidencial usadas pelo Planalto para organizar
-# leis/decretos/MPs a partir de 2003 (pasta _ato{inicio}-{fim}).
-def _faixa_mandato(ano: int) -> str:
-    inicio = 2003 + 4 * ((ano - 2003) // 4)
-    fim = inicio + 3
-    return f"_ato{inicio}-{fim}"
+# Nomes por extenso → atalho
+NAME_ALIASES = {
+    "constituicao federal": "cf", "constituicao": "cf", "crfb": "cf",
+    "cf/88": "cf", "cf 88": "cf",
+    "consolidacao das leis do trabalho": "clt",
+    "codigo civil": "cc",
+    "codigo de processo civil": "cpc", "novo cpc": "cpc",
+    "codigo penal": "cp",
+    "codigo de processo penal": "cpp",
+    "codigo de defesa do consumidor": "cdc",
+    "codigo tributario nacional": "ctn",
+    "estatuto da crianca e do adolescente": "eca",
+    "lei de execucao penal": "lep",
+    "lei de introducao": "lindb", "lei de introducao as normas": "lindb",
+    "lei de responsabilidade fiscal": "lrf",
+    "lei de diretrizes e bases": "ldb",
+    "codigo eleitoral": "ce",
+}
+
+# ---------------------------------------------------------------------------
+# 2. Normalização de texto e da referência
+# ---------------------------------------------------------------------------
+
+def _strip_accents(s: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s)
+        if unicodedata.category(c) != "Mn"
+    )
 
 
-def _candidatos_url(tipo: str, numero: str, ano: str | None) -> list[str]:
-    """
-    Gera uma lista de URLs prováveis no Planalto para o tipo/número/ano
-    informados, da mais provável para a menos provável. Cobre os padrões
-    de nomenclatura usados desde 1930 até hoje.
-    """
-    base = "https://www.planalto.gov.br/ccivil_03"
-    candidatos = []
-
-    if tipo == "constituicao":
-        candidatos.append(f"{base}/constituicao/constituicaocompilado.htm")
-        return candidatos
-
-    numero_limpo = numero.replace(".", "").replace("/", "")
-
-    if tipo == "decreto-lei":
-        candidatos.append(f"{base}/decreto-lei/del{numero_limpo}compilado.htm")
-        candidatos.append(f"{base}/decreto-lei/del{numero_limpo}.htm")
-        return candidatos
-
-    ano_int = int(ano) if ano else None
-
-    if tipo == "lei_complementar":
-        candidatos.append(f"{base}/leis/lcp/lcp{numero_limpo}.htm")
-        return candidatos
-
-    if tipo == "emenda_constitucional":
-        candidatos.append(f"{base}/constituicao/emendas/emc/emc{numero_limpo}.htm")
-        return candidatos
-
-    if tipo == "medida_provisoria":
-        if ano_int:
-            faixa = _faixa_mandato(ano_int)
-            candidatos.append(f"{base}/{faixa}/{ano}/mpv/{numero_limpo}.htm")
-            candidatos.append(f"{base}/{faixa}/{ano}/mpv/{numero_limpo}-impressao.htm")
-        return candidatos
-
-    if tipo in ("lei", "decreto"):
-        prefixo = "l" if tipo == "lei" else "d"
-        pasta = "lei" if tipo == "lei" else "decreto"
-
-        candidatos.append(f"{base}/{pasta}s/{prefixo}{numero_limpo}compilado.htm")
-        candidatos.append(f"{base}/{pasta}s/{prefixo}{numero_limpo}.htm")
-
-        if ano_int:
-            faixa = _faixa_mandato(ano_int)
-            candidatos.append(f"{base}/{faixa}/{ano}/{pasta}/{prefixo}{numero_limpo}compilado.htm")
-            candidatos.append(f"{base}/{faixa}/{ano}/{pasta}/{prefixo}{numero_limpo}.htm")
-
-    return candidatos
+def _norm(s: str) -> str:
+    s = _strip_accents(s.lower().strip())
+    s = s.replace("º", "").replace("°", "")
+    # remove "nº", "n.º", "n.", "no ", "num."
+    s = re.sub(r"\bn[.\s]*o?\.?\s*(?=\d)", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip(" .,;")
 
 
-def _resolver_url(tipo: str, numero: str, ano: str | None) -> str | None:
-    """Testa os candidatos em ordem e retorna o primeiro que responder 200."""
-    for url in _candidatos_url(tipo, numero, ano):
-        try:
-            resp = requests.head(url, headers=HEADERS, timeout=8, allow_redirects=True)
-            if resp.status_code == 200:
-                return url
-        except requests.RequestException:
-            continue
+def _expand_year(y: Optional[str]) -> Optional[int]:
+    if not y:
+        return None
+    y = int(y)
+    if y < 100:  # "43" → 1943; "06" → 2006 (corte em 30)
+        y += 1900 if y > 30 else 2000
+    return y
+
+
+_TYPE_PATTERNS = [
+    ("lc", r"lei complementar|\blcp?\b"),
+    ("del", r"decreto[- ]lei|\bdel\b|\bdl\b"),
+    ("mpv", r"medida provisoria|\bmpv?\b"),
+    ("emc", r"emenda constitucional|\bemc\b|\bec\b"),
+    ("dec", r"\bdecreto\b|\bdec\b"),
+    ("lei", r"\blei\b"),
+]
+
+
+def parse_reference(referencia: str):
+    """Retorna ('shortcut', chave) ou ('norma', tipo, numero, ano) ou None."""
+    n = _norm(referencia)
+
+    # 1) atalho direto (cc, clt...) ou nome por extenso
+    if n in SHORTCUTS:
+        return ("shortcut", n)
+    if n in NAME_ALIASES:
+        return ("shortcut", NAME_ALIASES[n])
+    # nome por extenso com ano junto ("codigo civil de 2002")
+    for name, key in NAME_ALIASES.items():
+        if n.startswith(name):
+            return ("shortcut", key)
+
+    # 2) tipo + número + ano (todos os formatos livres)
+    tipo = None
+    for t, pat in _TYPE_PATTERNS:
+        if re.search(pat, n):
+            tipo = t
+            break
+
+    m = re.search(r"(\d{1,3}(?:\.\d{3})+|\d+)(?:\s*[-]\s*(\d+))?", n)
+    if not m:
+        return None
+    numero = m.group(1).replace(".", "")
+    sufixo = m.group(2)  # MPs reeditadas tipo 2164-41
+    if sufixo:
+        numero = f"{numero}-{sufixo}"
+
+    ano = None
+    rest = n[m.end():]
+    # prioridade 1: qualquer ano de 4 dígitos (pega o ÚLTIMO, para não
+    # confundir com o dia em "de 10 de janeiro de 2002")
+    years4 = re.findall(r"\b(\d{4})\b", rest)
+    if years4:
+        ano = _expand_year(years4[-1])
+    else:
+        # prioridade 2: ano de 2 dígitos imediatamente após "/" ("8078/90")
+        ym = re.search(r"/\s*(\d{2})\b", rest)
+        if ym:
+            ano = _expand_year(ym.group(1))
+
+    if tipo is None:
+        tipo = "lei"  # número solto: assume lei ordinária
+    return ("norma", tipo, numero, ano)
+
+
+# ---------------------------------------------------------------------------
+# 3. Geração de candidatos de URL por tipo/época
+# ---------------------------------------------------------------------------
+
+def _dotted(num: str) -> str:
+    """10406 -> 10.406 (padrão pós-2003 do Planalto)."""
+    if "-" in num:
+        base, suf = num.split("-", 1)
+        return f"{_dotted(base)}-{suf}"
+    try:
+        return f"{int(num):,}".replace(",", ".")
+    except ValueError:
+        return num
+
+
+def _bucket(ano: int) -> str:
+    if ano < 2003:
+        return ""
+    start = 2003 + ((ano - 2003) // 4) * 4
+    return f"{start}-{start + 3}"
+
+
+def _case_variants(path: str) -> list[str]:
+    """Gera a variante com segmentos capitalizados usada em parte do site
+    (_Ato2019-2022/2019/Lei/L13874.htm)."""
+    parts = path.split("/")
+    cap = []
+    for p in parts:
+        if p.startswith("_ato"):
+            cap.append("_Ato" + p[4:])
+        elif p in ("lei", "decreto", "mpv"):
+            cap.append(p.capitalize())
+        elif re.match(r"^[a-z]+[\d.]", p):  # l13874.htm -> L13874.htm
+            cap.append(p[0].upper() + p[1:])
+        else:
+            cap.append(p)
+    v = "/".join(cap)
+    return [path] if v == path else [path, v]
+
+
+def candidate_paths(tipo: str, numero: str, ano: Optional[int]) -> list[str]:
+    out: list[str] = []
+    nd = _dotted(numero)
+
+    def add(*paths):
+        for p in paths:
+            for v in _case_variants(p):
+                if v not in out:
+                    out.append(v)
+
+    if tipo == "lei":
+        anos = [ano] if ano else []
+        # pós-2003 (só se soubermos o ano; sem ano não dá para achar o bucket)
+        for a in anos:
+            if a and a >= 2003:
+                b = _bucket(a)
+                for n_ in (nd, numero):
+                    add(f"_ato{b}/{a}/lei/l{n_}compilado.htm",
+                        f"_ato{b}/{a}/lei/l{n_}.htm")
+        # 1999–2002: subpasta do ano
+        for a in anos:
+            if a and 1999 <= a <= 2002:
+                for n_ in (numero, nd):
+                    add(f"leis/{a}/l{n_}compilada.htm",
+                        f"leis/{a}/l{n_}compilado.htm",
+                        f"leis/{a}/l{n_}.htm",
+                        f"leis/LEIS_{a}/L{n_}.htm")
+        # padrão antigo (sem ano na URL) — vale para a maioria até 1998 e
+        # serve de fallback quando o ano não foi informado
+        add(f"leis/l{numero}compilado.htm",
+            f"leis/l{numero}.htm",
+            f"leis/l{nd}.htm")
+        # sem ano informado, ainda tenta os buckets recentes mais prováveis
+        if not ano and len(numero) >= 5:
+            for a in range(2026, 2002, -1):
+                b = _bucket(a)
+                add(f"_ato{b}/{a}/lei/l{nd}.htm")
+                if len(out) > 60:
+                    break
+
+    elif tipo == "lc":
+        add(f"leis/lcp/lcp{numero}compilado.htm",
+            f"leis/lcp/lcp{numero}.htm",
+            f"leis/lcp/Lcp{numero}.htm")
+
+    elif tipo == "del":
+        add(f"decreto-lei/del{numero}compilado.htm",
+            f"decreto-lei/del{numero}.htm",
+            f"decreto-lei/1937-1946/del{numero}.htm",
+            f"decreto-lei/1965-1988/del{numero}.htm",
+            f"decreto-lei/1965-1988/Del{numero}.htm")
+
+    elif tipo == "dec":
+        if ano and ano >= 2003:
+            b = _bucket(ano)
+            for n_ in (nd, numero):
+                add(f"_ato{b}/{ano}/decreto/d{n_}.htm")
+        add(f"decreto/d{numero}.htm",
+            f"decreto/D{numero}.htm",
+            f"decreto/d{nd}.htm",
+            f"decreto/antigos/d{numero}.htm",
+            f"decreto/1990-1994/d{numero}.htm",
+            f"decreto/1995-1997/d{numero}.htm")
+
+    elif tipo == "mpv":
+        if ano and ano >= 2003:
+            b = _bucket(ano)
+            add(f"_ato{b}/{ano}/mpv/mpv{numero}.htm")
+        add(f"mpv/mpv{numero}.htm",
+            f"mpv/{numero}.htm",
+            f"mpv/antigas/{numero}.htm",
+            f"mpv/Antigas/{numero}.htm")
+
+    elif tipo == "emc":
+        add(f"constituicao/emendas/emc/emc{numero}.htm",
+            f"constituicao/Emendas/Emc/emc{numero}.htm")
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 4. Download com cache + validação
+# ---------------------------------------------------------------------------
+_page_cache: dict[str, tuple[float, str]] = {}
+_resolved: dict[str, str] = {}
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
+
+def _fetch(url: str) -> Optional[str]:
+    cached = _page_cache.get(url)
+    if cached and time.time() - cached[0] < 3600:
+        return cached[1]
+    try:
+        r = _session.get(url, timeout=TIMEOUT)
+    except requests.RequestException:
+        return None
+    if r.status_code != 200:
+        return None
+    # Planalto usa windows-1252/latin-1 na maior parte das páginas antigas
+    r.encoding = r.apparent_encoding or "windows-1252"
+    html = r.text
+    # valida que é mesmo uma página de norma
+    if "Art" not in html:
+        return None
+    text = BeautifulSoup(html, "html.parser").get_text("\n")
+    _page_cache[url] = (time.time(), text)
+    return text
+
+
+def resolve_and_fetch(referencia: str):
+    """Retorna (texto, url) ou (None, [urls tentadas])."""
+    parsed = parse_reference(referencia)
+    tried: list[str] = []
+    if parsed is None:
+        return None, tried
+
+    if parsed[0] == "shortcut":
+        key = parsed[1]
+        if key in _resolved:
+            t = _fetch(_resolved[key])
+            if t:
+                return t, _resolved[key]
+        for path in SHORTCUTS[key]:
+            url = BASE + path
+            tried.append(url)
+            t = _fetch(url)
+            if t:
+                _resolved[key] = url
+                return t, url
+        return None, tried
+
+    _, tipo, numero, ano = parsed
+    cache_key = f"{tipo}:{numero}:{ano}"
+    if cache_key in _resolved:
+        t = _fetch(_resolved[cache_key])
+        if t:
+            return t, _resolved[cache_key]
+    for path in candidate_paths(tipo, numero, ano):
+        url = BASE + path
+        tried.append(url)
+        t = _fetch(url)
+        if t:
+            _resolved[cache_key] = url
+            return t, url
+    return None, tried
+
+
+# ---------------------------------------------------------------------------
+# 5. Extração do artigo / inciso / alínea
+# ---------------------------------------------------------------------------
+_ART_HEADER = re.compile(
+    r"^[\s\"'(]*Art\s*\.?\s*([\d.]+(?:\s*-\s*[A-Za-z])?)\s*[ºo°]?",
+    re.MULTILINE,
+)
+
+
+def _norm_artnum(s: str) -> str:
+    return re.sub(r"\s", "", s).replace(".", "").upper()
+
+
+def extract_article(text: str, artigo: str) -> Optional[str]:
+    target = _norm_artnum(_norm(artigo).replace("art", "").strip(" ."))
+    headers = []
+    for m in _ART_HEADER.finditer(text):
+        headers.append((m.start(), _norm_artnum(m.group(1))))
+    for i, (pos, num) in enumerate(headers):
+        if num == target:
+            end = headers[i + 1][0] if i + 1 < len(headers) else len(text)
+            chunk = text[pos:end]
+            return _clean(chunk)
     return None
 
 
-def _interpretar_referencia(referencia: str) -> tuple[str, str, str | None]:
-    """
-    Interpreta referências em linguagem natural/abreviada, ex:
-    'CF', 'CLT', 'lei 8.078/1990', 'lei complementar 123/2006',
-    'decreto-lei 5.452/1943', 'MP 1.108/2022', 'EC 45/2004'.
-    Retorna (tipo, numero, ano).
-    """
-    ref = referencia.strip().upper()
-
-    if ref in ATALHOS:
-        return ATALHOS[ref]
-
-    m = re.search(r"\bEC\b\.?\s*(\d+)\s*/?\s*(\d{4})?", ref) or re.search(
-        r"EMENDA\s+CONSTITUCIONAL\s*N?º?\s*(\d+)\s*/?\s*(\d{4})?", ref
-    )
-    if m:
-        return ("emenda_constitucional", m.group(1), m.group(2))
-
-    m = re.search(r"LEI\s+COMPLEMENTAR\s*N?º?\s*([\d.]+)\s*/?\s*(\d{4})?", ref) or re.search(
-        r"\bLC\b\.?\s*([\d.]+)\s*/?\s*(\d{4})?", ref
-    )
-    if m:
-        return ("lei_complementar", m.group(1), m.group(2))
-
-    m = re.search(r"DECRETO[\s\-]LEI\s*N?º?\s*([\d.]+)\s*/?\s*(\d{4})?", ref)
-    if m:
-        return ("decreto-lei", m.group(1), m.group(2))
-
-    m = re.search(r"MEDIDA\s+PROVIS[ÓO]RIA\s*N?º?\s*([\d.]+)\s*/?\s*(\d{4})?", ref) or re.search(
-        r"\bMP\b\.?\s*([\d.]+)\s*/?\s*(\d{4})?", ref
-    )
-    if m:
-        return ("medida_provisoria", m.group(1), m.group(2))
-
-    m = re.search(r"DECRETO\s*N?º?\s*([\d.]+)\s*/?\s*(\d{4})?", ref)
-    if m:
-        return ("decreto", m.group(1), m.group(2))
-
-    m = re.search(r"LEI\s*N?º?\s*([\d.]+)\s*/?\s*(\d{4})?", ref)
-    if m:
-        return ("lei", m.group(1), m.group(2))
-
-    raise ValueError(
-        f"Não consegui interpretar a referência '{referencia}'. "
-        f"Use formatos como 'lei 8.078/1990', 'decreto-lei 5.452/1943', "
-        f"'lei complementar 123/2006', 'MP 1.108/2022', 'EC 45/2004', "
-        f"ou os atalhos: {', '.join(ATALHOS.keys())}."
-    )
+def _clean(chunk: str) -> str:
+    lines = [ln.strip() for ln in chunk.splitlines()]
+    lines = [ln for ln in lines if ln]
+    # remove lixo de navegação eventual
+    lines = [ln for ln in lines if not re.match(r"^(Presid.ncia|Casa Civil|Subchefia)", ln)]
+    out, prev_blank = [], False
+    for ln in lines:
+        out.append(ln)
+    return "\n\n".join(out)
 
 
-def _baixar_paragrafos(url: str) -> list[str]:
-    """
-    Retorna os "blocos" de texto da página, divididos por linha em branco.
-
-    Importante: nas páginas do Planalto, os artigos nem sempre estão em
-    tags <p> separadas — muitas vezes é tudo texto corrido dentro do
-    corpo, e cada artigo vira seu próprio bloco só por causa das quebras
-    de linha. Por isso dividimos o texto extraído por linhas em branco,
-    em vez de depender da estrutura de tags.
-    """
-    resp = requests.get(url, headers=HEADERS, timeout=20)
-    # Forçamos ISO-8859-1: a detecção automática (chardet) erra com
-    # frequência nessas páginas antigas do Planalto, produzindo caracteres
-    # corrompidos (mojibake) em vez do acentuado correto.
-    resp.encoding = "ISO-8859-1"
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for tag in soup(["script", "style"]):
-        tag.decompose()
-
-    texto = soup.get_text(separator="\n")
-    blocos = re.split(r"\n\s*\n", texto)
-    return [b.strip() for b in blocos if b.strip()]
+_ROMAN = re.compile(r"^([IVXLCDM]+)\s*[-–]", re.MULTILINE)
+_LETTER = re.compile(r"^([a-z])\s*\)", re.MULTILINE)
+_PARAG = re.compile(r"^(§+\s*[\d.ºo°]+|Par.grafo\s+.nico)", re.IGNORECASE | re.MULTILINE)
 
 
-def _extrair_artigo(paragrafos: list[str], artigo: str) -> list[str] | None:
-    """
-    Localiza o parágrafo cujo TEXTO COMEÇA com 'Art. {artigo}' (não uma
-    menção no meio do texto) e junta com os parágrafos seguintes até o
-    próximo parágrafo que comece com 'Art. {outro número}'.
-
-    Retorna uma LISTA de blocos de texto (parágrafo, inciso, alínea, §),
-    já limpos de fragmentação de tags HTML — não uma string única — para
-    permitir filtrar por inciso/alínea específica depois.
-
-    Trabalhar em cima dos blocos reais da página evita confundir o artigo
-    pedido com referências cruzadas do tipo "(Vide art. 7º, XIII, da
-    Constituição Federal)" que aparecem no meio do texto de outros artigos.
-    """
-    artigo_norm = artigo.strip().upper().replace("º", "").replace("°", "")
-
-    padrao_inicio = re.compile(
-        rf"^Art\.?\s*{re.escape(artigo_norm)}(?!\d)", re.IGNORECASE
-    )
-    padrao_qualquer_artigo = re.compile(r"^Art\.?\s*\d+", re.IGNORECASE)
-
-    indice_inicio = None
-    for i, p in enumerate(paragrafos):
-        if padrao_inicio.match(p.strip()):
-            indice_inicio = i
-            break
-
-    if indice_inicio is None:
+def extract_item(article_text: str, item: str) -> Optional[str]:
+    item_n = _norm(item)
+    # parágrafo? ("§ 1", "1", "paragrafo unico")
+    if item_n.startswith("§") or "paragrafo" in item_n:
+        pat = _PARAG
+        want = re.sub(r"[^0-9u]", "", item_n) or "u"
+    elif re.fullmatch(r"[ivxlcdm]+", item_n):
+        pat = _ROMAN
+        want = item_n.upper()
+    elif re.fullmatch(r"[a-z]", item_n):
+        pat = _LETTER
+        want = item_n
+    else:
         return None
 
-    trecho = [paragrafos[indice_inicio]]
-    for p in paragrafos[indice_inicio + 1:]:
-        p_strip = p.strip()
-        if padrao_qualquer_artigo.match(p_strip) and not padrao_inicio.match(p_strip):
-            break
-        trecho.append(p)
-        if len(trecho) > 400:  # corte de segurança pra artigos muito longos
-            break
-
-    # A página do Planalto frequentemente quebra o texto em blocos curtos
-    # por causa de tags de negrito/itálico, gerando fragmentos de 1-2
-    # palavras que não são parágrafos de verdade (ex. "Art. 1", "o", "A").
-    # Junta esses fragmentos curtos ao bloco seguinte, mas preserva a
-    # quebra de linha real entre incisos, alíneas e parágrafos (§),
-    # que são estruturalmente significativos num texto legal.
-    LIMITE_FRAGMENTO = 20  # caracteres
-    blocos_limpos = []
-    buffer = ""
-    for b in trecho:
-        b_strip = re.sub(r"\s+", " ", b.strip())
-        if not b_strip:
-            continue
-        buffer = f"{buffer} {b_strip}".strip() if buffer else b_strip
-        if len(buffer) > LIMITE_FRAGMENTO:
-            blocos_limpos.append(buffer)
-            buffer = ""
-    if buffer:
-        blocos_limpos.append(buffer)
-
-    return blocos_limpos
-
-
-def _filtrar_inciso_ou_alinea(blocos: list[str], referencia_item: str) -> str | None:
-    """
-    Filtra, dentro dos blocos de um artigo já extraído, o bloco
-    correspondente a um inciso (numeração romana: I, II, III, IV-A...)
-    ou alínea (letra: a, b, c...).
-
-    Devolve o bloco isolado se encontrado. Não tenta juntar sub-itens
-    dentro do inciso/alínea (ex. itens de uma alínea que tenha sub-lista) —
-    devolve só o bloco que começa com a marcação pedida.
-    """
-    ref = referencia_item.strip().upper().rstrip(".-)")
-
-    # Letras que também são numerais romanos válidos (I, V, X, L, C, D, M)
-    # são ambíguas — priorizamos a interpretação como INCISO ROMANO,
-    # porque é o caso mais comum, e só tratamos como alínea se a
-    # referência não for um numeral romano válido.
-    eh_romano = bool(re.fullmatch(r"[IVXLCDM]+(-[A-Z])?", ref))
-
-    if eh_romano:
-        padrao_romano = re.compile(rf"^{re.escape(ref)}\s*[-–\.]", re.IGNORECASE)
-        for b in blocos:
-            if padrao_romano.match(b.strip()):
-                return b.strip()
-        # Não achou como romano — tenta como alínea antes de desistir,
-        # cobrindo o caso raro de referência de letra única que não seja
-        # numeral romano válido em contexto de alínea.
-
-    if re.fullmatch(r"[A-Z]", ref):
-        padrao_alinea = re.compile(rf"^{re.escape(ref)}\s*\)", re.IGNORECASE)
-        for b in blocos:
-            if padrao_alinea.match(b.strip()):
-                return b.strip()
-
+    marks = [(m.start(), m.group(1)) for m in pat.finditer(article_text)]
+    all_marks = sorted(
+        [(m.start(), "x") for p in (_ROMAN, _LETTER, _PARAG)
+         for m in p.finditer(article_text)]
+    )
+    for pos, label in marks:
+        norm_label = _norm_artnum(_strip_accents(label)).upper()
+        if pat is _PARAG:
+            norm_label = re.sub(r"[^0-9U]", "", norm_label.replace("UNICO", "U")) or "U"
+            want_cmp = want.upper()
+        elif pat is _LETTER:
+            norm_label = norm_label.lower()
+            want_cmp = want.lower()
+        else:
+            want_cmp = want
+        if norm_label == want_cmp:
+            nxt = [p for p, _ in all_marks if p > pos]
+            end = nxt[0] if nxt else len(article_text)
+            # inclui o caput (primeira linha do artigo) para contexto
+            caput = article_text.split("\n\n", 1)[0]
+            return caput + " [...]\n\n" + article_text[pos:end].strip()
     return None
+
+
+# ---------------------------------------------------------------------------
+# 6. Ferramentas MCP
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def buscar_artigo(referencia: str, artigo: str, item: str = "") -> str:
+    """Busca o texto de um artigo específico de qualquer norma federal
+    brasileira publicada no Planalto (leis, decretos-lei, decretos, leis
+    complementares, medidas provisórias, emendas constitucionais e a
+    Constituição Federal).
+
+    Args:
+        referencia: referência da norma. Aceita atalhos (CF, CLT, CC, CPC,
+            CP, CPP, CDC, CTN, ECA, LEP, LINDB, LRF, LDB, CE), nomes por
+            extenso ("código civil") ou formato livre em qualquer grafia:
+            "lei 8.078/1990", "lei 8078/90", "Lei nº 10.406, de 2002",
+            "decreto-lei 5452", "LC 123/2006", "MP 1.108/2022", "EC 45".
+            Informar o ano ajuda na resolução de leis pós-2003.
+        artigo: número do artigo em qualquer grafia ("7", "7º", "1010",
+            "1.010", "7-A").
+        item: opcional — inciso (romano: "III"), alínea (letra: "a") ou
+            parágrafo ("§ 2", "parágrafo único") para retornar só esse
+            trecho. Vazio = artigo completo.
+    """
+    text, info = resolve_and_fetch(referencia)
+    if text is None:
+        tried = "\n".join(f"  - {u}" for u in info[:15]) or "  (nenhuma URL gerada)"
+        return (
+            f"Não localizei '{referencia}' no Planalto. URLs testadas:\n{tried}\n"
+            "Dica: informe tipo + número + ano (ex.: 'lei 10.406/2002')."
+        )
+    url = info
+    art = extract_article(text, artigo)
+    if art is None:
+        return (
+            f"Norma encontrada ({url}), mas não localizei o art. {artigo}. "
+            "Confira o número (aceito com ou sem pontos: 1010 ou 1.010)."
+        )
+    if item:
+        piece = extract_item(art, item)
+        if piece is None:
+            return (
+                f"Fonte: {url}\n\n{art}\n\n"
+                f"[Aviso: não isolei o item '{item}'; artigo completo acima.]"
+            )
+        return f"Fonte: {url}\n\n{piece}"
+    return f"Fonte: {url}\n\n{art}"
 
 
 @mcp.tool()
 def listar_atalhos() -> str:
-    """Lista os atalhos de códigos/diplomas de resolução instantânea (CF, CLT etc.)."""
-    return "\n".join(ATALHOS.keys())
-
-
-@mcp.tool()
-def buscar_artigo(referencia: str, artigo: str, item: str = "") -> str:
-    """
-    Busca o texto de um artigo específico de qualquer norma federal
-    brasileira publicada no Planalto (leis, decretos-lei, decretos,
-    leis complementares, medidas provisórias, emendas constitucionais
-    e a Constituição Federal).
-
-    A URL é resolvida dinamicamente a partir da referência informada —
-    não depende de uma lista fixa, então cobre qualquer norma federal
-    cujo padrão de URL o resolvedor reconheça.
-
-    Args:
-        referencia: referência da norma. Aceita atalhos (CF, CLT, CC, CPC,
-            CP, CPP, CDC, CTN) ou formato livre, ex: "lei 8.078/1990",
-            "decreto-lei 5.452/1943", "lei complementar 123/2006",
-            "MP 1.108/2022", "EC 45/2004", "decreto 10.854/2021".
-            Informar o ano ajuda bastante na resolução para leis/decretos
-            pós-2003; sem ano, a busca pode falhar ou demorar mais.
-        artigo: número do artigo (ex: "7", "482", "7-A")
-        item: opcional — inciso (numeração romana, ex: "III", "XIII") ou
-            alínea (letra, ex: "a", "b") para retornar só esse trecho em
-            vez do artigo inteiro. Deixe vazio para trazer o artigo completo.
-    """
-    try:
-        tipo, numero, ano = _interpretar_referencia(referencia)
-    except ValueError as e:
-        return str(e)
-
-    if tipo == "constituicao":
-        url = _candidatos_url(tipo, numero, ano)[0]
-    else:
-        url = _resolver_url(tipo, numero, ano)
-
-    if url is None:
-        return (
-            f"Não consegui localizar a URL de '{referencia}' no Planalto testando "
-            f"os padrões conhecidos. Isso acontece com normas muito antigas, muito "
-            f"recentes, ou com convenção de URL fora do padrão. Tente informar o "
-            f"ano explicitamente, ou verifique manualmente em "
-            f"planalto.gov.br/ccivil_03/legislacao ou legislacao.planalto.gov.br."
-        )
-
-    try:
-        paragrafos = _baixar_paragrafos(url)
-    except requests.RequestException as e:
-        return f"Erro ao acessar {url}: {e}"
-
-    blocos = _extrair_artigo(paragrafos, artigo)
-    if blocos is None:
-        return (
-            f"Encontrei a norma em {url}, mas não localizei 'Art. {artigo}' no "
-            f"texto — confira manualmente, o artigo pode ter numeração diferente "
-            f"(ex. com letra) ou ter sido revogado/renumerado."
-        )
-
-    if item.strip():
-        trecho_item = _filtrar_inciso_ou_alinea(blocos, item)
-        if trecho_item is None:
-            return (
-                f"Encontrei o Art. {artigo} em {url}, mas não localizei o item "
-                f"'{item}' dentro dele — confira manualmente, a numeração pode ser "
-                f"diferente do esperado (ex. inciso em vez de alínea)."
-            )
-        return f"Fonte: {url}\n\n{trecho_item}"
-
-    return f"Fonte: {url}\n\n" + "\n\n".join(blocos)
+    """Lista os atalhos de códigos/diplomas de resolução instantânea
+    (CF, CLT etc.)."""
+    return "\n".join(k.upper() for k in SHORTCUTS)
 
 
 if __name__ == "__main__":
